@@ -909,16 +909,17 @@ table.data-table tbody td {
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
 /* ============================================================
-   KONFIGURASI — SESUAIKAN JIKA PERLU
+   KONFIGURASI
    ============================================================ */
-const SHEET_ID = "1JWORujkSyuUmfFuckqVBHnO77KUj4PWB4ljDHvoB_PY";
+const SHEET_ID        = "1JWORujkSyuUmfFuckqVBHnO77KUj4PWB4ljDHvoB_PY";
+const SHEET_DATA_TAMU = "Form Responses 1"; // nama tab Google Form responses
+const SHEET_STATISTIK = "Statistik";         // nama tab statistik
 
-// Nama sheet harus PERSIS sama dengan nama tab di Google Sheets (case-sensitive)
-// Cek: klik kanan pada tab sheet → lihat nama tepatnya
-// ⚠️ Nama harus PERSIS sama dengan nama tab di Google Sheets (case-sensitive)
-// Dari screenshot: tab respons form = "Form Responses 1", statistik = "Statistik"
-const SHEET_DATA_TAMU  = "Form Responses 1";  // tab tempat Google Form menyimpan data
-const SHEET_STATISTIK  = "Statistik";          // tab statistik
+// URL CSV — tidak butuh library Google, tidak ada error "google is not defined"
+// Sheet harus sudah di-publish: File → Share → Publish to web → pilih sheet → CSV → Publish
+function csvUrl(sheetName) {
+  return `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetName)}&_=${Date.now()}`;
+}
 
 /* ============================================================
    JAM & TANGGAL REAL-TIME (WIT = UTC+9)
@@ -927,13 +928,12 @@ function getWIT() {
   const now = new Date();
   return new Date(now.getTime() + (9 * 60 - now.getTimezoneOffset()) * 60000);
 }
-
 function updateClock() {
   const wit = getWIT();
-  const jam = wit.toLocaleTimeString('id-ID', {hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
-  const tgl = wit.toLocaleDateString('id-ID', {weekday:'long',day:'numeric',month:'long',year:'numeric'});
-  document.getElementById('live-clock').textContent = jam;
-  document.getElementById('tanggal-badge').textContent = '📅 ' + tgl;
+  document.getElementById('live-clock').textContent =
+    wit.toLocaleTimeString('id-ID', {hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+  document.getElementById('tanggal-badge').textContent =
+    '📅 ' + wit.toLocaleDateString('id-ID', {weekday:'long',day:'numeric',month:'long',year:'numeric'});
 }
 setInterval(updateClock, 1000);
 updateClock();
@@ -948,76 +948,68 @@ document.querySelectorAll('.nav-tab').forEach(tab => {
       t.setAttribute('aria-selected','false');
     });
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('aktif'));
-
     tab.classList.add('aktif');
     tab.setAttribute('aria-selected','true');
-    const panelId = tab.getAttribute('data-panel');
-    const panel = document.getElementById(panelId);
+    const panel = document.getElementById(tab.getAttribute('data-panel'));
     if (panel) {
       panel.classList.add('aktif');
-      // Render chart saat tab statistik dibuka, gunakan cache
-      if (panelId === 'panel-statistik') {
-        renderChartsFromData(_tamuCache);
-      }
+      if (tab.getAttribute('data-panel') === 'panel-statistik') renderChartsFromData(_tamuCache);
     }
   });
 });
 
 /* ============================================================
-   JSONP HELPER (menghindari CORS dari GViz API)
+   CSV PARSER — parse CSV teks menjadi array of arrays
+   Mendukung quoted fields dengan koma dan newline di dalam
    ============================================================ */
-function jsonpFetch(sheetName) {
-  return new Promise((resolve, reject) => {
-    const cbName = '_gvizCb_' + Date.now() + '_' + Math.random().toString(36).slice(2);
-    const timeout = setTimeout(() => {
-      delete window[cbName];
-      const el = document.getElementById('s_' + cbName);
-      if (el) el.remove();
-      reject(new Error('Timeout 15 detik'));
-    }, 15000);
-
-    window[cbName] = function(data) {
-      clearTimeout(timeout);
-      delete window[cbName];
-      const el = document.getElementById('s_' + cbName);
-      if (el) el.remove();
-      resolve(data);
-    };
-
-    // Encode nama sheet dengan benar
-    const encodedSheet = encodeURIComponent(sheetName);
-    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?sheet=${encodedSheet}&tqx=out:json&callback=${cbName}&_=${Date.now()}`;
-
-    const script = document.createElement('script');
-    script.id = 's_' + cbName;
-    script.onerror = () => {
-      clearTimeout(timeout);
-      delete window[cbName];
-      reject(new Error('Script JSONP gagal load — mungkin sheet belum di-publish'));
-    };
-    script.src = url;
-    document.head.appendChild(script);
-  });
+function parseCsv(text) {
+  const rows = [];
+  let row = [], cur = '', inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const nx = text[i + 1];
+    if (inQ) {
+      if (ch === '"' && nx === '"') { cur += '"'; i++; }
+      else if (ch === '"')          { inQ = false; }
+      else                          { cur += ch; }
+    } else {
+      if      (ch === '"')  { inQ = true; }
+      else if (ch === ',')  { row.push(cur.trim()); cur = ''; }
+      else if (ch === '\n') { row.push(cur.trim()); rows.push(row); row = []; cur = ''; }
+      else if (ch === '\r') { /* skip */ }
+      else                  { cur += ch; }
+    }
+  }
+  if (cur || row.length) { row.push(cur.trim()); rows.push(row); }
+  return rows.filter(r => r.some(c => c !== ''));
 }
 
 /* ============================================================
-   FUNGSI DEBUG BANNER
+   FETCH CSV dari Google Sheets (pakai fetch API biasa)
+   Tidak pakai JSONP, tidak ada dependency Google library
+   ============================================================ */
+async function fetchCsv(sheetName) {
+  const url = csvUrl(sheetName);
+  const resp = await fetch(url, { cache: 'no-store' });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} saat ambil sheet "${sheetName}"`);
+  const text = await resp.text();
+  if (!text || text.trim() === '') throw new Error(`Sheet "${sheetName}" kosong atau belum dipublish`);
+  return parseCsv(text);
+}
+
+/* ============================================================
+   DEBUG BANNER
    ============================================================ */
 function tampilDebug(pesan, jenis) {
   let banner = document.getElementById('debug-banner');
-  if (!banner) {
-    banner = document.createElement('div');
-    banner.id = 'debug-banner';
-    document.body.prepend(banner);
-  }
-  const warna  = jenis === 'ok' ? '#d1fae5' : jenis === 'warn' ? '#fef3c7' : '#fee2e2';
-  const warnaT = jenis === 'ok' ? '#065f46' : jenis === 'warn' ? '#92400e'  : '#991b1b';
+  if (!banner) { banner = document.createElement('div'); banner.id = 'debug-banner'; document.body.prepend(banner); }
+  const bg   = jenis==='ok' ? '#d1fae5' : jenis==='warn' ? '#fef3c7' : '#fee2e2';
+  const fg   = jenis==='ok' ? '#065f46' : jenis==='warn' ? '#92400e'  : '#991b1b';
   Object.assign(banner.style, {
-    position:'fixed', top:'0', left:'0', right:'0', zIndex:'9999',
-    padding:'10px 16px', fontSize:'13px', fontFamily:'monospace',
-    display:'flex', gap:'10px', alignItems:'center',
-    background: warna, color: warnaT,
-    borderBottom: '1px solid ' + warnaT + '44'
+    position:'fixed',top:'0',left:'0',right:'0',zIndex:'9999',
+    padding:'10px 16px',fontSize:'13px',fontFamily:'monospace',
+    display:'flex',gap:'10px',alignItems:'center',background:bg,color:fg,
+    borderBottom:'1px solid '+fg+'44'
   });
   banner.innerHTML = pesan + ' <button onclick="this.parentElement.remove()" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:16px;color:inherit;">✕</button>';
   if (jenis === 'ok') setTimeout(() => banner?.remove(), 5000);
@@ -1025,57 +1017,31 @@ function tampilDebug(pesan, jenis) {
 
 /* ============================================================
    FETCH STATISTIK
-   Sheet Statistik layout (0-indexed):
-     Row 0 = Judul
-     Row 1 = "Diperbarui..."
-     Row 2 = (kosong)
-     Row 3 = "RINGKASAN UMUM"
-     Row 4 = "Total Tamu Keseluruhan | 4"  ← getValue(4, 1)
-     Row 5 = "Tamu Hari Ini | 4"           ← getValue(5, 1)
-     Row 6 = "Tamu Bulan Ini | 4"          ← getValue(6, 1)
-     Row 7 = "Rata-rata Tamu per Hari | 4" ← getValue(7, 1)
-
-   CATATAN: GViz API mungkin melewati baris kosong, jadi kita cari
-   berdasarkan isi kolom A, bukan nomor baris.
+   Sheet Statistik — cari nilai berdasarkan label di kolom A
    ============================================================ */
 async function fetchStatistik() {
   try {
-    const data = await jsonpFetch(SHEET_STATISTIK);
-    if (!data || !data.table || !data.table.rows) throw new Error('Respons tidak valid');
+    const rows = await fetchCsv(SHEET_STATISTIK);
+    console.log('📊 Sheet Statistik — rows:', rows.length);
 
-    const rows = data.table.rows;
-
-    // Cari nilai berdasarkan label di kolom A (lebih robust dari row index)
-    let total = '0', hariIni = '0', bulanIni = '0', rataRata = '0';
-
-    rows.forEach(row => {
-      if (!row || !row.c) return;
-      const labelCell = row.c[0];
-      const valueCell = row.c[1];
-      if (!labelCell || !labelCell.v) return;
-
-      const label = String(labelCell.v).toLowerCase().trim();
-      const val   = valueCell && valueCell.v != null ? String(valueCell.v) : '0';
-
-      if (label.includes('total') || label.includes('keseluruhan')) total = val;
-      else if (label.includes('hari ini'))   hariIni  = val;
-      else if (label.includes('bulan ini'))  bulanIni = val;
-      else if (label.includes('rata-rata') || label.includes('rata rata')) rataRata = val;
+    let total='0', hariIni='0', bulanIni='0', rataRata='0';
+    rows.forEach(r => {
+      if (!r[0]) return;
+      const label = r[0].toLowerCase().trim();
+      const val   = (r[1] || '0').trim();
+      if (label.includes('total') || label.includes('keseluruhan')) total    = val;
+      else if (label.includes('hari ini'))                           hariIni  = val;
+      else if (label.includes('bulan ini'))                          bulanIni = val;
+      else if (label.includes('rata'))                               rataRata = val;
     });
 
-    // Update semua elemen statistik
-    const setEls = (ids, val) => ids.forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.textContent = val;
-    });
-
-    setEls(['stat-hari-ini',  'stat2-hari'],   hariIni);
-    setEls(['stat-bulan-ini', 'stat2-bulan'],  bulanIni);
-    setEls(['stat-total',     'stat2-total'],  total);
-    setEls(['stat-rata'],                       rataRata);
-
-    const subHari = document.getElementById('stat-hari-ini-sub');
-    if (subHari) subHari.textContent = 'Per hari ini (WIT)';
+    const set = (ids, v) => ids.forEach(id => { const el=document.getElementById(id); if(el) el.textContent=v; });
+    set(['stat-hari-ini','stat2-hari'],   hariIni);
+    set(['stat-bulan-ini','stat2-bulan'], bulanIni);
+    set(['stat-total','stat2-total'],     total);
+    set(['stat-rata'],                    rataRata);
+    const sub = document.getElementById('stat-hari-ini-sub');
+    if (sub) sub.textContent = 'Per hari ini (WIT)';
 
     console.log('✅ Statistik:', { total, hariIni, bulanIni, rataRata });
     return { total, hariIni, bulanIni, rataRata };
@@ -1087,96 +1053,71 @@ async function fetchStatistik() {
 
 /* ============================================================
    FETCH DATA TAMU
-   Auto-deteksi 2 format sheet:
-
-   FORMAT A — "Form Responses 1" (Google Form langsung):
-     0=Timestamp, 1=Tanggal, 2=Jam, 3=Nama Lengkap,
-     4=Instansi/Asal, 5=Nomor HP/WA, 6=Keperluan,
-     7=Tujuan Bertemu (Bagian), 8=Nama Pegawai yang Dituju,
-     9=Keterangan Tambahan, 10=Status Kunjungan
-
-   FORMAT B — "Data Tamu" (dengan kolom No di depan):
-     0=No, 1=Timestamp, 2=Tanggal, 3=Jam, 4=Nama Lengkap,
-     5=Instansi/Asal, 6=Nomor HP/WA, 7=Keperluan,
-     8=Tujuan Bertemu (Bagian), 9=Nama Pegawai yang Dituju,
-     10=Keterangan Tambahan, 11=Status Kunjungan
+   Auto-deteksi format dari header baris pertama CSV:
+     Format A (Form Responses 1): Timestamp, Tanggal, Jam, Nama Lengkap, ...
+     Format B (Data Tamu):        No, Timestamp, Tanggal, Jam, Nama Lengkap, ...
    ============================================================ */
 async function fetchDataTamu() {
   try {
-    const data = await jsonpFetch(SHEET_DATA_TAMU);
-    if (!data || !data.table) throw new Error('Respons tidak valid');
+    const rows = await fetchCsv(SHEET_DATA_TAMU);
+    if (rows.length < 2) { console.warn('Sheet data tamu kurang dari 2 baris'); return []; }
 
-    const rows = data.table.rows || [];
-    const cols = data.table.cols || [];
-    console.log('\u{1F4C4} Total baris dari GViz:', rows.length, '| Kolom:', cols.length);
-    if (cols.length) console.log('  Header kolom:', cols.map(c => c.label || c.id).join(' | '));
+    // Baris pertama = header
+    const header = rows[0].map(h => h.toLowerCase().trim());
+    console.log('📋 Header kolom:', header.join(' | '));
 
-    // Auto-deteksi format: kolom 0 bertipe datetime = Format A (Form Responses)
-    const col0Type  = cols[0] ? (cols[0].type  || '').toLowerCase() : '';
-    const col0Label = cols[0] ? (cols[0].label || '').toLowerCase() : '';
-    const isFormatA = col0Type === 'datetime' ||
-                      col0Label.includes('timestamp') ||
-                      col0Label.includes('cap waktu');
-    console.log('  Format:', isFormatA ? 'A (Form Responses - Timestamp col 0)' : 'B (Data Tamu - No col 0)');
+    // Deteksi format: apakah kolom 0 adalah Timestamp?
+    const isFormatA = header[0].includes('timestamp') || header[0].includes('cap waktu');
+    console.log('Format:', isFormatA ? 'A - Form Responses (Timestamp di col 0)' : 'B - Data Tamu (No di col 0)');
+
+    // Buat mapping nama kolom → indeks (robust terhadap urutan kolom berbeda)
+    const idx = {};
+    header.forEach((h, i) => { idx[h] = i; });
+
+    // Helper: cari kolom berdasarkan kata kunci
+    const findCol = (...keywords) => {
+      for (const kw of keywords) {
+        const found = header.findIndex(h => h.includes(kw));
+        if (found !== -1) return found;
+      }
+      return -1;
+    };
+
+    const colTanggal   = findCol('tanggal');
+    const colJam       = findCol('jam');
+    const colNama      = findCol('nama lengkap', 'nama');
+    const colInstansi  = findCol('instansi', 'asal');
+    const colKeperluan = findCol('keperluan');
+    const colBagian    = findCol('tujuan', 'bagian');
+    const colPegawai   = findCol('nama pegawai', 'pegawai');
+    const colStatus    = findCol('status');
+
+    console.log('Mapping kolom:', { colTanggal, colJam, colNama, colInstansi, colKeperluan, colBagian, colPegawai, colStatus });
 
     const tamu = [];
-    rows.forEach((r) => {
-      if (!r || !r.c) return;
+    // Mulai dari baris ke-1 (skip header)
+    rows.slice(1).forEach((r, i) => {
+      const nama = colNama >= 0 ? r[colNama]?.trim() : '';
+      if (!nama || nama.toLowerCase().includes('nama')) return;
 
-      const getVal = (colIdx) => {
-        const cell = r.c[colIdx];
-        if (!cell) return '';
-        if (cell.f) return String(cell.f);
-        if (cell.v != null) return String(cell.v);
-        return '';
-      };
-
-      if (isFormatA) {
-        // FORMAT A: Timestamp(0) | Tanggal(1) | Jam(2) | Nama(3) | Instansi(4) | HP(5) | Keperluan(6) | Bagian(7) | Pegawai(8) | Ket(9) | Status(10)
-        const nama = getVal(3).trim();
-        if (!nama || nama.toLowerCase().includes('nama')) return;
-        tamu.push({
-          no        : String(tamu.length + 1),
-          timestamp : getVal(0),
-          tanggal   : getVal(1),
-          jam       : getVal(2),
-          nama      : nama,
-          instansi  : getVal(4),
-          hp        : getVal(5),
-          keperluan : getVal(6),
-          bagian    : getVal(7),
-          pegawai   : getVal(8),
-          keterangan: getVal(9),
-          status    : getVal(10) || 'Menunggu',
-        });
-      } else {
-        // FORMAT B: No(0) | Timestamp(1) | Tanggal(2) | Jam(3) | Nama(4) | Instansi(5) | HP(6) | Keperluan(7) | Bagian(8) | Pegawai(9) | Ket(10) | Status(11)
-        const nama  = getVal(4).trim();
-        const noVal = getVal(0).trim();
-        if (!nama || nama.toLowerCase().includes('nama')) return;
-        if (noVal.toLowerCase() === 'no') return;
-        tamu.push({
-          no        : noVal,
-          timestamp : getVal(1),
-          tanggal   : getVal(2),
-          jam       : getVal(3),
-          nama      : nama,
-          instansi  : getVal(5),
-          hp        : getVal(6),
-          keperluan : getVal(7),
-          bagian    : getVal(8),
-          pegawai   : getVal(9),
-          keterangan: getVal(10),
-          status    : getVal(11) || 'Menunggu',
-        });
-      }
+      tamu.push({
+        no        : String(i + 1),
+        tanggal   : colTanggal  >= 0 ? r[colTanggal]  || '' : '',
+        jam       : colJam      >= 0 ? r[colJam]       || '' : '',
+        nama      : nama,
+        instansi  : colInstansi >= 0 ? r[colInstansi]  || '' : '',
+        keperluan : colKeperluan>= 0 ? r[colKeperluan] || '' : '',
+        bagian    : colBagian   >= 0 ? r[colBagian]    || '' : '',
+        pegawai   : colPegawai  >= 0 ? r[colPegawai]   || '' : '',
+        status    : colStatus   >= 0 ? r[colStatus]    || 'Menunggu' : 'Menunggu',
+      });
     });
 
-    console.log('\u2705 Data tamu valid:', tamu.length, 'baris');
-    if (tamu.length > 0) console.log('  Contoh baris pertama:', JSON.stringify(tamu[0]));
+    console.log('✅ Data tamu:', tamu.length, 'baris');
+    if (tamu.length > 0) console.log('  Contoh:', JSON.stringify(tamu[0]));
     return tamu;
   } catch(err) {
-    console.warn('\u26A0\uFE0F Gagal ambil data tamu:', err.message);
+    console.warn('⚠️ Gagal ambil data tamu:', err.message);
     return [];
   }
 }
@@ -1185,189 +1126,130 @@ async function fetchDataTamu() {
    RENDER TABEL RIWAYAT
    ============================================================ */
 function keperluanBadgeClass(k) {
-  const kl = (k || '').toLowerCase();
-  if (kl.includes('konsultasi') || kl.includes('informasi')) return 'konsultasi';
-  if (kl.includes('surat'))                                   return 'surat';
-  if (kl.includes('haji')  || kl.includes('umrah'))          return 'haji';
-  if (kl.includes('nikah') || kl.includes('cerai'))          return 'nikah';
-  if (kl.includes('dinas') || kl.includes('koordinasi'))     return 'dinas';
+  const kl = (k||'').toLowerCase();
+  if (kl.includes('konsultasi')||kl.includes('informasi')) return 'konsultasi';
+  if (kl.includes('surat'))                                 return 'surat';
+  if (kl.includes('haji')||kl.includes('umrah'))           return 'haji';
+  if (kl.includes('nikah')||kl.includes('cerai'))          return 'nikah';
+  if (kl.includes('dinas')||kl.includes('koordinasi'))     return 'dinas';
   return 'lain';
 }
-
 function statusBadgeInfo(s) {
-  const sl = (s || '').toLowerCase();
-  if (sl.includes('dilayani')) return ['dilayani', '✅ Dilayani'];
-  if (sl.includes('selesai'))  return ['selesai',  '✔ Selesai'];
-  return ['menunggu', '⏳ Menunggu'];
+  const sl = (s||'').toLowerCase();
+  if (sl.includes('dilayani')) return ['dilayani','✅ Dilayani'];
+  if (sl.includes('selesai'))  return ['selesai', '✔ Selesai'];
+  return ['menunggu','⏳ Menunggu'];
 }
 
 function renderTabelTamu(tamu) {
   const tbody = document.getElementById('tbody-tamu');
   const info  = document.getElementById('jumlah-tampil');
   if (!tbody) return;
-
   if (!tamu || tamu.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="8">
-      <div class="empty-state">
-        <div class="empty-icon">📋</div>
-        <p>Belum ada data kunjungan tersimpan, atau sheet belum di-publish.</p>
-      </div>
-    </td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state">
+      <div class="empty-icon">📋</div>
+      <p>Belum ada data kunjungan.</p></div></td></tr>`;
     if (info) info.textContent = 'Menampilkan 0 data';
     return;
   }
-
-  const sorted = [...tamu].reverse(); // terbaru di atas
+  const sorted = [...tamu].reverse();
   tbody.innerHTML = sorted.map((t, i) => {
     const [stClass, stLabel] = statusBadgeInfo(t.status);
     return `<tr>
-      <td>${i + 1}</td>
-      <td style="white-space:nowrap;">${t.tanggal || '—'}<br>
-        <span style="color:var(--abu-3);font-size:11px;">${t.jam || ''} WIT</span>
-      </td>
-      <td><strong>${t.nama || '—'}</strong></td>
-      <td>${t.instansi || '—'}</td>
-      <td><span class="badge-keperluan ${keperluanBadgeClass(t.keperluan)}">${t.keperluan || '—'}</span></td>
-      <td>${t.bagian || '—'}</td>
-      <td>${t.pegawai || '—'}</td>
+      <td>${i+1}</td>
+      <td style="white-space:nowrap;">${t.tanggal||'—'}<br>
+        <span style="color:var(--abu-3);font-size:11px;">${t.jam||''} WIT</span></td>
+      <td><strong>${t.nama||'—'}</strong></td>
+      <td>${t.instansi||'—'}</td>
+      <td><span class="badge-keperluan ${keperluanBadgeClass(t.keperluan)}">${t.keperluan||'—'}</span></td>
+      <td>${t.bagian||'—'}</td>
+      <td>${t.pegawai||'—'}</td>
       <td><span class="status-badge ${stClass}">${stLabel}</span></td>
     </tr>`;
   }).join('');
-
   if (info) info.textContent = 'Menampilkan ' + sorted.length + ' data';
 }
 
 /* ============================================================
    RENDER CHARTS
    ============================================================ */
-let chartHarian = null, chartKeperluan = null, chartBagian = null;
-
+let chartHarian=null, chartKeperluan=null, chartBagian=null;
 function destroyCharts() {
-  [chartHarian, chartKeperluan, chartBagian].forEach(c => { if (c) c.destroy(); });
-  chartHarian = chartKeperluan = chartBagian = null;
+  [chartHarian,chartKeperluan,chartBagian].forEach(c=>{ if(c) c.destroy(); });
+  chartHarian=chartKeperluan=chartBagian=null;
 }
 
 function renderChartsFromData(tamu) {
   destroyCharts();
+  const HIJAU ='#1e7a42', EMAS='#f4a820';
+  const COLORS=['#1e7a42','#f4a820','#2980b9','#e74c3c','#8b5cf6','#f39c12','#16a085','#c0392b'];
+  const noData='<p style="text-align:center;color:var(--abu-4);padding:60px 0;font-size:13px;">Belum ada data</p>';
 
-  const HIJAU  = '#1e7a42';
-  const EMAS   = '#f4a820';
-  const COLORS = ['#1e7a42','#f4a820','#2980b9','#e74c3c','#8b5cf6','#f39c12','#16a085','#c0392b'];
+  // Chart 1: Harian
+  const hariMap={};
+  (tamu||[]).forEach(t=>{ if(!t.tanggal) return; hariMap[t.tanggal]=(hariMap[t.tanggal]||0)+1; });
+  const hariKeys=Object.keys(hariMap).slice(-7);
+  const hariData=hariKeys.map(k=>hariMap[k]);
 
-  const noDataMsg = '<p style="text-align:center;color:var(--abu-4);padding:60px 0;font-size:13px;">Belum ada data kunjungan</p>';
-
-  /* --- Chart 1: Harian 7 hari terakhir --- */
-  const hariMap = {};
-  (tamu || []).forEach(t => {
-    if (!t.tanggal) return;
-    hariMap[t.tanggal] = (hariMap[t.tanggal] || 0) + 1;
-  });
-  const hariKeys  = Object.keys(hariMap).slice(-7);
-  const hariData  = hariKeys.map(k => hariMap[k]);
-
-  const ctxH = document.getElementById('chartHarian');
-  if (ctxH && hariKeys.length > 0) {
-    chartHarian = new Chart(ctxH, {
-      type: 'bar',
-      data: { labels: hariKeys, datasets: [{
-        label: 'Jumlah Tamu', data: hariData,
-        backgroundColor: hariData.map((v,i) => i === hariData.length-1 ? HIJAU : HIJAU+'99'),
-        borderColor: HIJAU, borderWidth: 1, borderRadius: 6
-      }]},
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        plugins: { legend:{display:false}, tooltip:{callbacks:{label: c => ' '+c.parsed.y+' orang'}} },
-        scales: {
-          x: { grid:{display:false}, ticks:{font:{size:11}} },
-          y: { beginAtZero:true, ticks:{precision:0,font:{size:11},callback: v => v+' org'}, grid:{color:'#f0f0f0'} }
-        }
-      }
+  const ctxH=document.getElementById('chartHarian');
+  if (ctxH && hariKeys.length>0) {
+    chartHarian=new Chart(ctxH,{type:'bar',data:{labels:hariKeys,datasets:[{
+      label:'Jumlah Tamu',data:hariData,
+      backgroundColor:hariData.map((_,i)=>i===hariData.length-1?HIJAU:HIJAU+'99'),
+      borderColor:HIJAU,borderWidth:1,borderRadius:6}]},
+      options:{responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>' '+c.parsed.y+' orang'}}},
+        scales:{x:{grid:{display:false},ticks:{font:{size:11}}},
+                y:{beginAtZero:true,ticks:{precision:0,font:{size:11},callback:v=>v+' org'},grid:{color:'#f0f0f0'}}}}
     });
-  } else if (ctxH) {
-    document.getElementById('wrap-chartHarian').innerHTML = noDataMsg;
-  }
+  } else if(ctxH) document.getElementById('wrap-chartHarian').innerHTML=noData;
 
-  /* --- Chart 2: Keperluan (Donut) --- */
-  const kepMap = {};
-  (tamu || []).forEach(t => {
-    const k = t.keperluan || 'Lainnya';
-    kepMap[k] = (kepMap[k] || 0) + 1;
-  });
-  const kepLabels = Object.keys(kepMap);
-  const kepData   = kepLabels.map(k => kepMap[k]);
-
-  const ctxK = document.getElementById('chartKeperluan');
-  if (ctxK && kepLabels.length > 0) {
-    const wrapK = document.getElementById('wrap-chartKeperluan');
-    // Hapus legend lama jika ada
-    wrapK.querySelectorAll('.legend-kep').forEach(el => el.remove());
-    const legendDiv = document.createElement('div');
-    legendDiv.className = 'legend-kep';
-    legendDiv.style.cssText = 'display:flex;flex-wrap:wrap;gap:2px;margin-bottom:8px;color:var(--abu-3);';
-    legendDiv.innerHTML = kepLabels.map((l,i) =>
-      `<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;margin:2px 4px;">
-         <span style="width:9px;height:9px;border-radius:2px;background:${COLORS[i%COLORS.length]};display:inline-block;"></span>${l}
-       </span>`).join('');
-    wrapK.insertBefore(legendDiv, ctxK);
-
-    chartKeperluan = new Chart(ctxK, {
-      type: 'doughnut',
-      data: { labels: kepLabels, datasets: [{
-        data: kepData, backgroundColor: COLORS, borderWidth: 2, borderColor:'#fff', hoverOffset:6
-      }]},
-      options: {
-        responsive:true, maintainAspectRatio:false, cutout:'62%',
-        plugins: { legend:{display:false}, tooltip:{callbacks:{label: c => {
-          const tot = c.dataset.data.reduce((a,b)=>a+b,0);
+  // Chart 2: Keperluan
+  const kepMap={};
+  (tamu||[]).forEach(t=>{ const k=t.keperluan||'Lainnya'; kepMap[k]=(kepMap[k]||0)+1; });
+  const kepLabels=Object.keys(kepMap), kepData=kepLabels.map(k=>kepMap[k]);
+  const ctxK=document.getElementById('chartKeperluan');
+  if (ctxK && kepLabels.length>0) {
+    const wrapK=document.getElementById('wrap-chartKeperluan');
+    wrapK.querySelectorAll('.legend-kep').forEach(el=>el.remove());
+    const ld=document.createElement('div'); ld.className='legend-kep';
+    ld.style.cssText='display:flex;flex-wrap:wrap;gap:2px;margin-bottom:8px;';
+    ld.innerHTML=kepLabels.map((l,i)=>`<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;margin:2px 4px;">
+      <span style="width:9px;height:9px;border-radius:2px;background:${COLORS[i%COLORS.length]};display:inline-block;"></span>${l}</span>`).join('');
+    wrapK.insertBefore(ld,ctxK);
+    chartKeperluan=new Chart(ctxK,{type:'doughnut',data:{labels:kepLabels,datasets:[{
+      data:kepData,backgroundColor:COLORS,borderWidth:2,borderColor:'#fff',hoverOffset:6}]},
+      options:{responsive:true,maintainAspectRatio:false,cutout:'62%',
+        plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>{
+          const tot=c.dataset.data.reduce((a,b)=>a+b,0);
           return ` ${c.label}: ${c.parsed} (${Math.round(c.parsed/tot*100)}%)`;
-        }}}}
-      }
+        }}}}}
     });
-  } else if (ctxK) {
-    document.getElementById('wrap-chartKeperluan').innerHTML = noDataMsg;
-  }
+  } else if(ctxK) document.getElementById('wrap-chartKeperluan').innerHTML=noData;
 
-  /* --- Chart 3: Per Bagian (Horizontal Bar) --- */
-  const bagMap = {};
-  (tamu || []).forEach(t => {
-    const b = t.bagian || 'Lainnya';
-    bagMap[b] = (bagMap[b] || 0) + 1;
-  });
-  const bagSorted = Object.entries(bagMap).sort((a,b) => b[1]-a[1]);
-  const bagLabels = bagSorted.map(e => e[0]);
-  const bagData   = bagSorted.map(e => e[1]);
-
-  const ctxB = document.getElementById('chartBagian');
-  if (ctxB && bagLabels.length > 0) {
-    document.getElementById('wrap-chartBagian').style.height =
-      Math.max(260, bagLabels.length * 38 + 60) + 'px';
-    chartBagian = new Chart(ctxB, {
-      type: 'bar',
-      data: { labels: bagLabels, datasets: [{
-        label: 'Jumlah Tamu', data: bagData,
-        backgroundColor: EMAS+'cc', borderColor: EMAS, borderWidth:1, borderRadius:4
-      }]},
-      options: {
-        indexAxis:'y', responsive:true, maintainAspectRatio:false,
-        plugins: { legend:{display:false}, tooltip:{callbacks:{label: c => ' '+c.parsed.x+' orang'}} },
-        scales: {
-          x: { beginAtZero:true, ticks:{precision:0,font:{size:11}}, grid:{color:'#f5f5f5'} },
-          y: { grid:{display:false}, ticks:{font:{size:12}} }
-        }
-      }
+  // Chart 3: Bagian
+  const bagMap={};
+  (tamu||[]).forEach(t=>{ const b=t.bagian||'Lainnya'; bagMap[b]=(bagMap[b]||0)+1; });
+  const bagS=Object.entries(bagMap).sort((a,b)=>b[1]-a[1]);
+  const bagLabels=bagS.map(e=>e[0]), bagData=bagS.map(e=>e[1]);
+  const ctxB=document.getElementById('chartBagian');
+  if (ctxB && bagLabels.length>0) {
+    document.getElementById('wrap-chartBagian').style.height=Math.max(260,bagLabels.length*38+60)+'px';
+    chartBagian=new Chart(ctxB,{type:'bar',data:{labels:bagLabels,datasets:[{
+      label:'Jumlah Tamu',data:bagData,backgroundColor:EMAS+'cc',borderColor:EMAS,borderWidth:1,borderRadius:4}]},
+      options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>' '+c.parsed.x+' orang'}}},
+        scales:{x:{beginAtZero:true,ticks:{precision:0,font:{size:11}},grid:{color:'#f5f5f5'}},
+                y:{grid:{display:false},ticks:{font:{size:12}}}}}
     });
-  } else if (ctxB) {
-    document.getElementById('wrap-chartBagian').innerHTML = noDataMsg;
-  }
+  } else if(ctxB) document.getElementById('wrap-chartBagian').innerHTML=noData;
 
-  /* --- Hari paling ramai --- */
-  if (hariKeys.length > 0) {
-    const maxVal = Math.max(...hariData);
-    const maxIdx = hariData.indexOf(maxVal);
-    const ramai = document.getElementById('stat2-ramai');
-    const rSub  = document.getElementById('stat2-ramai-sub');
-    if (ramai) ramai.textContent = hariKeys[maxIdx] || '—';
-    if (rSub)  rSub.textContent  = maxVal + ' kunjungan';
+  // Hari paling ramai
+  if (hariKeys.length>0) {
+    const maxVal=Math.max(...hariData), maxIdx=hariData.indexOf(maxVal);
+    const r=document.getElementById('stat2-ramai'), rs=document.getElementById('stat2-ramai-sub');
+    if(r) r.textContent=hariKeys[maxIdx]||'—';
+    if(rs) rs.textContent=maxVal+' kunjungan';
   }
 }
 
@@ -1375,20 +1257,17 @@ function renderChartsFromData(tamu) {
    SEARCH & FILTER TABEL
    ============================================================ */
 function filterTabel() {
-  const keyword   = (document.getElementById('search-tamu')?.value || '').toLowerCase();
-  const keperluan = (document.getElementById('filter-keperluan')?.value || '').toLowerCase();
-  const rows = document.querySelectorAll('#tbody-tamu tr');
-  let visible = 0;
-  rows.forEach(row => {
-    const text        = row.textContent.toLowerCase();
-    const matchSearch = !keyword   || text.includes(keyword);
-    const matchFilter = !keperluan || text.includes(keperluan);
-    const show = matchSearch && matchFilter;
-    row.style.display = show ? '' : 'none';
-    if (show) visible++;
+  const kw  = (document.getElementById('search-tamu')?.value||'').toLowerCase();
+  const kep = (document.getElementById('filter-keperluan')?.value||'').toLowerCase();
+  let vis=0;
+  document.querySelectorAll('#tbody-tamu tr').forEach(row=>{
+    const txt=row.textContent.toLowerCase();
+    const show=(!kw||txt.includes(kw))&&(!kep||txt.includes(kep));
+    row.style.display=show?'':'none';
+    if(show) vis++;
   });
-  const info = document.getElementById('jumlah-tampil');
-  if (info) info.textContent = 'Menampilkan ' + visible + ' data';
+  const info=document.getElementById('jumlah-tampil');
+  if(info) info.textContent='Menampilkan '+vis+' data';
 }
 document.getElementById('search-tamu')?.addEventListener('input', filterTabel);
 document.getElementById('filter-keperluan')?.addEventListener('change', filterTabel);
@@ -1396,50 +1275,37 @@ document.getElementById('filter-keperluan')?.addEventListener('change', filterTa
 /* ============================================================
    INISIALISASI & AUTO-REFRESH
    ============================================================ */
-let _tamuCache = [];
+let _tamuCache=[];
 
 async function initData() {
-  tampilDebug('⏳ Mengambil data dari Google Sheets...', 'warn');
+  tampilDebug('⏳ Mengambil data dari Google Sheets...','warn');
   try {
-    const [statResult, tamuData] = await Promise.all([
-      fetchStatistik(),
-      fetchDataTamu()
-    ]);
-
+    const [statResult, tamuData] = await Promise.all([fetchStatistik(), fetchDataTamu()]);
     _tamuCache = tamuData;
     renderTabelTamu(tamuData);
+    if (document.getElementById('panel-statistik')?.classList.contains('aktif')) renderChartsFromData(tamuData);
 
-    // Render chart jika panel statistik sudah aktif saat load
-    if (document.getElementById('panel-statistik')?.classList.contains('aktif')) {
-      renderChartsFromData(tamuData);
-    }
-
-    if (tamuData.length > 0) {
-      tampilDebug('✅ Data berhasil dimuat — ' + tamuData.length + ' baris tamu', 'ok');
+    if (tamuData.length>0) {
+      tampilDebug('✅ Berhasil — '+tamuData.length+' data tamu dimuat','ok');
     } else if (statResult) {
-      tampilDebug('⚠️ Sheet Statistik terhubung, tapi sheet Data Tamu kosong atau belum dipublish. Cek nama sheet dan publish status.', 'warn');
+      tampilDebug('⚠️ Sheet Statistik OK, tapi Data Tamu kosong. Cek nama tab: "'+SHEET_DATA_TAMU+'"','warn');
     } else {
-      tampilDebug('❌ Tidak ada data. Pastikan: 1) Sheet sudah dipublish (File→Share→Publish to web) 2) Nama sheet tepat: "' + SHEET_DATA_TAMU + '" dan "' + SHEET_STATISTIK + '"', 'error');
+      tampilDebug('❌ Tidak ada data. Pastikan sheet sudah di-publish (File → Share → Publish to web) dan nama tab tepat.','error');
     }
   } catch(err) {
-    tampilDebug('❌ Error: ' + err.message, 'error');
+    tampilDebug('❌ Error: '+err.message,'error');
     console.error(err);
   }
 }
 
-// Auto-refresh setiap 2 menit
-setInterval(async () => {
+setInterval(async ()=>{
   try {
-    const [, tamuData] = await Promise.all([fetchStatistik(), fetchDataTamu()]);
-    _tamuCache = tamuData;
-    renderTabelTamu(tamuData);
-    if (document.getElementById('panel-statistik')?.classList.contains('aktif')) {
-      renderChartsFromData(tamuData);
-    }
-  } catch(e) { console.warn('Auto-refresh gagal:', e.message); }
+    const [,td]=await Promise.all([fetchStatistik(),fetchDataTamu()]);
+    _tamuCache=td; renderTabelTamu(td);
+    if (document.getElementById('panel-statistik')?.classList.contains('aktif')) renderChartsFromData(td);
+  } catch(e){ console.warn('Auto-refresh gagal:',e.message); }
 }, 120000);
 
-// Mulai
 initData();
 </script>
 </body>
