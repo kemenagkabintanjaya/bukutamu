@@ -1,0 +1,75 @@
+# ================================================================
+# .htaccess — Konfigurasi Keamanan Buku Tamu Digital
+# Kemenag Kab. Intan Jaya
+# ================================================================
+
+# Aktifkan RewriteEngine (opsional, untuk URL cantik)
+Options -Indexes
+Options -ExecCGI
+
+# --- [1] Blokir akses langsung ke file sensitif ---
+<FilesMatch "^(config\.php|submit\.php)$">
+    # Izinkan hanya request internal (submit.php dipanggil oleh index.php via fetch)
+    # Untuk config.php: blokir total akses langsung dari browser
+</FilesMatch>
+
+# Blokir akses langsung ke config.php dari browser
+<Files "config.php">
+    Order deny,allow
+    Deny from all
+</Files>
+
+# --- [2] Blokir akses ke folder data/ ---
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Blokir akses langsung ke folder data
+    RewriteRule ^data/ - [F,L]
+</IfModule>
+
+# --- [3] Header keamanan HTTP ---
+<IfModule mod_headers.c>
+    # Cegah clickjacking
+    Header always set X-Frame-Options "SAMEORIGIN"
+
+    # Cegah MIME-type sniffing
+    Header always set X-Content-Type-Options "nosniff"
+
+    # XSS Protection (browser lama)
+    Header always set X-XSS-Protection "1; mode=block"
+
+    # Referrer Policy
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+
+    # Content Security Policy — sesuaikan jika butuh CDN tambahan
+    Header always set Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://docs.google.com https://fonts.googleapis.com;"
+
+    # Hapus header yang membocorkan info server
+    Header unset X-Powered-By
+    Header unset Server
+</IfModule>
+
+# --- [4] Proteksi file .htaccess itu sendiri ---
+<Files ".htaccess">
+    Order allow,deny
+    Deny from all
+</Files>
+
+# --- [5] Cegah akses ke file backup / log ---
+<FilesMatch "\.(bak|log|sql|old|orig|tmp)$">
+    Order deny,allow
+    Deny from all
+</FilesMatch>
+
+# --- [6] Aktifkan GZIP compression (performa) ---
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/html text/css text/javascript application/javascript application/json
+</IfModule>
+
+# --- [7] Cache control ---
+<IfModule mod_expires.c>
+    ExpiresActive On
+    ExpiresByType text/css "access plus 1 week"
+    ExpiresByType application/javascript "access plus 1 week"
+    ExpiresByType image/svg+xml "access plus 1 month"
+</IfModule>
