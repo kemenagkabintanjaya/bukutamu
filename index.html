@@ -915,8 +915,10 @@ const SHEET_ID = "1JWORujkSyuUmfFuckqVBHnO77KUj4PWB4ljDHvoB_PY";
 
 // Nama sheet harus PERSIS sama dengan nama tab di Google Sheets (case-sensitive)
 // Cek: klik kanan pada tab sheet → lihat nama tepatnya
-const SHEET_DATA_TAMU  = "Data Tamu";   // <-- sesuaikan jika nama berbeda
-const SHEET_STATISTIK  = "Statistik";   // <-- sesuaikan jika nama berbeda
+// ⚠️ Nama harus PERSIS sama dengan nama tab di Google Sheets (case-sensitive)
+// Dari screenshot: tab respons form = "Form Responses 1", statistik = "Statistik"
+const SHEET_DATA_TAMU  = "Form Responses 1";  // tab tempat Google Form menyimpan data
+const SHEET_STATISTIK  = "Statistik";          // tab statistik
 
 /* ============================================================
    JAM & TANGGAL REAL-TIME (WIT = UTC+9)
@@ -1085,12 +1087,19 @@ async function fetchStatistik() {
 
 /* ============================================================
    FETCH DATA TAMU
-   Kolom sheet "Data Tamu":
+   Auto-deteksi 2 format sheet:
+
+   FORMAT A — "Form Responses 1" (Google Form langsung):
+     0=Timestamp, 1=Tanggal, 2=Jam, 3=Nama Lengkap,
+     4=Instansi/Asal, 5=Nomor HP/WA, 6=Keperluan,
+     7=Tujuan Bertemu (Bagian), 8=Nama Pegawai yang Dituju,
+     9=Keterangan Tambahan, 10=Status Kunjungan
+
+   FORMAT B — "Data Tamu" (dengan kolom No di depan):
      0=No, 1=Timestamp, 2=Tanggal, 3=Jam, 4=Nama Lengkap,
      5=Instansi/Asal, 6=Nomor HP/WA, 7=Keperluan,
      8=Tujuan Bertemu (Bagian), 9=Nama Pegawai yang Dituju,
-     10=Keterangan Tambahan, 11=Status Kunjungan,
-     12=Jam Keluar, 13=Notifikasi Terkirim
+     10=Keterangan Tambahan, 11=Status Kunjungan
    ============================================================ */
 async function fetchDataTamu() {
   try {
@@ -1098,51 +1107,76 @@ async function fetchDataTamu() {
     if (!data || !data.table) throw new Error('Respons tidak valid');
 
     const rows = data.table.rows || [];
-    console.log('📄 Total baris dari GViz (termasuk header jika ada):', rows.length);
+    const cols = data.table.cols || [];
+    console.log('\u{1F4C4} Total baris dari GViz:', rows.length, '| Kolom:', cols.length);
+    if (cols.length) console.log('  Header kolom:', cols.map(c => c.label || c.id).join(' | '));
 
-    // GViz terkadang menyertakan baris header sebagai data,
-    // filter baris yang kolom Nama-nya bukan teks header
+    // Auto-deteksi format: kolom 0 bertipe datetime = Format A (Form Responses)
+    const col0Type  = cols[0] ? (cols[0].type  || '').toLowerCase() : '';
+    const col0Label = cols[0] ? (cols[0].label || '').toLowerCase() : '';
+    const isFormatA = col0Type === 'datetime' ||
+                      col0Label.includes('timestamp') ||
+                      col0Label.includes('cap waktu');
+    console.log('  Format:', isFormatA ? 'A (Form Responses - Timestamp col 0)' : 'B (Data Tamu - No col 0)');
+
     const tamu = [];
-    rows.forEach((r, idx) => {
+    rows.forEach((r) => {
       if (!r || !r.c) return;
 
       const getVal = (colIdx) => {
         const cell = r.c[colIdx];
         if (!cell) return '';
-        // GViz bisa mengembalikan nilai Date sebagai object dengan f (formatted)
         if (cell.f) return String(cell.f);
         if (cell.v != null) return String(cell.v);
         return '';
       };
 
-      const nama = getVal(4).trim();
-      // Skip baris kosong atau baris header
-      if (!nama || nama.toLowerCase() === 'nama lengkap' || nama.toLowerCase() === 'nama') return;
-      // Skip baris jika No adalah teks (header row)
-      const noVal = getVal(0).trim();
-      if (noVal.toLowerCase() === 'no') return;
-
-      tamu.push({
-        no        : noVal,
-        timestamp : getVal(1),
-        tanggal   : getVal(2),
-        jam       : getVal(3),
-        nama      : nama,
-        instansi  : getVal(5),
-        hp        : getVal(6),
-        keperluan : getVal(7),
-        bagian    : getVal(8),
-        pegawai   : getVal(9),
-        keterangan: getVal(10),
-        status    : getVal(11) || 'Menunggu',
-      });
+      if (isFormatA) {
+        // FORMAT A: Timestamp(0) | Tanggal(1) | Jam(2) | Nama(3) | Instansi(4) | HP(5) | Keperluan(6) | Bagian(7) | Pegawai(8) | Ket(9) | Status(10)
+        const nama = getVal(3).trim();
+        if (!nama || nama.toLowerCase().includes('nama')) return;
+        tamu.push({
+          no        : String(tamu.length + 1),
+          timestamp : getVal(0),
+          tanggal   : getVal(1),
+          jam       : getVal(2),
+          nama      : nama,
+          instansi  : getVal(4),
+          hp        : getVal(5),
+          keperluan : getVal(6),
+          bagian    : getVal(7),
+          pegawai   : getVal(8),
+          keterangan: getVal(9),
+          status    : getVal(10) || 'Menunggu',
+        });
+      } else {
+        // FORMAT B: No(0) | Timestamp(1) | Tanggal(2) | Jam(3) | Nama(4) | Instansi(5) | HP(6) | Keperluan(7) | Bagian(8) | Pegawai(9) | Ket(10) | Status(11)
+        const nama  = getVal(4).trim();
+        const noVal = getVal(0).trim();
+        if (!nama || nama.toLowerCase().includes('nama')) return;
+        if (noVal.toLowerCase() === 'no') return;
+        tamu.push({
+          no        : noVal,
+          timestamp : getVal(1),
+          tanggal   : getVal(2),
+          jam       : getVal(3),
+          nama      : nama,
+          instansi  : getVal(5),
+          hp        : getVal(6),
+          keperluan : getVal(7),
+          bagian    : getVal(8),
+          pegawai   : getVal(9),
+          keterangan: getVal(10),
+          status    : getVal(11) || 'Menunggu',
+        });
+      }
     });
 
-    console.log('✅ Data tamu valid:', tamu.length, 'baris');
-    if (tamu.length > 0) console.log('  Contoh baris pertama:', tamu[0]);
+    console.log('\u2705 Data tamu valid:', tamu.length, 'baris');
+    if (tamu.length > 0) console.log('  Contoh baris pertama:', JSON.stringify(tamu[0]));
     return tamu;
   } catch(err) {
-    console.warn('⚠️ Gagal ambil data tamu:', err.message);
+    console.warn('\u26A0\uFE0F Gagal ambil data tamu:', err.message);
     return [];
   }
 }
